@@ -1,0 +1,284 @@
+<Window x:Class="PasteTool.App.Windows.HistoryWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:PasteTool.App.Controls"
+        Title="PasteTool"
+        Width="1060"
+        Height="600"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Topmost="True"
+        Background="Transparent"
+        AllowsTransparency="True"
+        FontFamily="Microsoft YaHei UI"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <Border Background="#FFF6F0E6"
+            BorderBrush="#2A1F1B"
+            BorderThickness="1"
+            CornerRadius="24"
+            Padding="20">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="420" />
+                <ColumnDefinition Width="20" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Row="0" Grid.ColumnSpan="3" Margin="0,0,0,12"
+                        Orientation="Horizontal"
+                        HorizontalAlignment="Right">
+                <Button x:Name="ClearButton"
+                        Width="92"
+                        Height="32"
+                        Margin="0,0,10,0"
+                        Click="ClearButton_Click"
+                        Background="#E9D9C3"
+                        BorderBrush="#C2A37A"
+                        Foreground="#2A1F1B"
+                        Content="清空历史" />
+                <Button x:Name="SettingsButton"
+                        Width="72"
+                        Height="32"
+                        Click="SettingsButton_Click"
+                        Background="#C96442"
+                        BorderBrush="#C96442"
+                        Foreground="White"
+                        Content="设置" />
+            </StackPanel>
+
+            <Border Grid.Row="1"
+                    Grid.Column="0"
+                    Padding="14"
+                    Background="#FFFFFBF6"
+                    BorderBrush="#D8C8B2"
+                    BorderThickness="1"
+                    CornerRadius="20">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="12" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <TextBox x:Name="SearchBox"
+                             Height="42"
+                             Padding="14,8"
+                             FontSize="16"
+                             VerticalContentAlignment="Center"
+                             Background="#FFF4ECDE"
+                             BorderBrush="#D8C8B2"
+                             BorderThickness="1"
+                             TextChanged="SearchBox_TextChanged"
+                             PreviewKeyDown="SearchBox_PreviewKeyDown"
+                             AutomationProperties.Name="搜索剪贴板历史"
+                             AutomationProperties.HelpText="输入关键词搜索，使用方向键选择，Enter粘贴" />
+
+                    <Grid Grid.Row="2">
+                        <ListBox x:Name="HistoryList"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 ScrollViewer.CanContentScroll="True"
+                                 VirtualizingPanel.IsVirtualizing="True"
+                                 VirtualizingPanel.VirtualizationMode="Recycling"
+                                 SelectionChanged="HistoryList_SelectionChanged"
+                                 MouseDoubleClick="HistoryList_MouseDoubleClick">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="Margin" Value="0,0,0,10" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ListBoxItem">
+                                                <Border x:Name="ItemBorder"
+                                                        Padding="12"
+                                                        Background="#FFF7F0E5"
+                                                        BorderBrush="#E1D3BF"
+                                                        BorderThickness="1"
+                                                        CornerRadius="16">
+                                                    <ContentPresenter />
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="ItemBorder" Property="Background" Value="#FFEEE4D0" />
+                                                        <Setter TargetName="ItemBorder" Property="BorderBrush" Value="#C96442" />
+                                                    </Trigger>
+                                                    <Trigger Property="IsSelected" Value="True">
+                                                        <Setter TargetName="ItemBorder" Property="Background" Value="#FFE8D8C0" />
+                                                        <Setter TargetName="ItemBorder" Property="BorderBrush" Value="#C96442" />
+                                                        <Setter TargetName="ItemBorder" Property="BorderThickness" Value="2" />
+                                                    </Trigger>
+                                                    <Trigger Property="IsFocused" Value="True">
+                                                        <Setter TargetName="ItemBorder" Property="BorderBrush" Value="#C96442" />
+                                                        <Setter TargetName="ItemBorder" Property="BorderThickness" Value="2" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <Border Width="42"
+                                                Height="42"
+                                                Margin="0,0,12,0"
+                                                Background="#C96442"
+                                                CornerRadius="12">
+                                            <TextBlock Text="{Binding KindLabel}"
+                                                       Foreground="White"
+                                                       FontWeight="Bold"
+                                                       VerticalAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       AutomationProperties.Name="{Binding KindLabel}" />
+                                        </Border>
+
+                                        <StackPanel Grid.Column="1"
+                                                    VerticalAlignment="Center">
+                                            <controls:HighlightedTextBlock Item="{Binding}"
+                                                                          FontSize="14"
+                                                                          FontWeight="SemiBold"
+                                                                          Foreground="#1F1A17"
+                                                                          TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Margin="0,4,0,0"
+                                                       Text="{Binding FormatsText}"
+                                                       FontSize="12"
+                                                       Foreground="#6E6259"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+
+                                        <TextBlock Grid.Column="2"
+                                                   Margin="12,0,0,0"
+                                                   VerticalAlignment="Top"
+                                                   FontSize="12"
+                                                   Foreground="#8C7D72"
+                                                   Text="{Binding CapturedAtText}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <TextBlock x:Name="EmptyStateText"
+                                   Text="没有匹配到历史记录"
+                                   FontSize="16"
+                                   FontWeight="SemiBold"
+                                   Foreground="#8C7D72"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   Visibility="Collapsed"
+                                   AutomationProperties.LiveSetting="Polite" />
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="1"
+                    Grid.Column="2"
+                    Padding="18"
+                    Background="#FFFFFBF6"
+                    BorderBrush="#D8C8B2"
+                    BorderThickness="1"
+                    CornerRadius="20">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="12" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock x:Name="PreviewMetaText"
+                               FontSize="13"
+                               Foreground="#6E6259"
+                               Text="选择一条历史记录查看预览" />
+
+                    <Grid Grid.Row="2">
+                        <Border x:Name="PlaceholderBorder"
+                                Background="#FFF4ECDE"
+                                BorderBrush="#E1D3BF"
+                                BorderThickness="1"
+                                CornerRadius="18">
+                            <TextBlock x:Name="PlaceholderText"
+                                       Text="暂无预览"
+                                       FontSize="18"
+                                       FontWeight="SemiBold"
+                                       Foreground="#8C7D72"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center" />
+                        </Border>
+
+                        <Grid x:Name="LoadingIndicator"
+                              Visibility="Collapsed">
+                            <Border Background="#FFF4ECDE"
+                                    BorderBrush="#E1D3BF"
+                                    BorderThickness="1"
+                                    CornerRadius="18" />
+                            <StackPanel HorizontalAlignment="Center"
+                                        VerticalAlignment="Center">
+                                <TextBlock Text="加载中..."
+                                           FontSize="16"
+                                           FontWeight="SemiBold"
+                                           Foreground="#6E6259"
+                                           HorizontalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+
+                        <Image x:Name="ImagePreview"
+                               Stretch="Uniform"
+                               Visibility="Collapsed" />
+
+                        <RichTextBox x:Name="RichTextPreview"
+                                     IsReadOnly="True"
+                                     BorderThickness="0"
+                                     Background="#FFFFFBF6"
+                                     VerticalScrollBarVisibility="Auto"
+                                     Visibility="Collapsed" />
+
+                        <ScrollViewer x:Name="TextPreviewScroll"
+                                      VerticalScrollBarVisibility="Auto"
+                                      Visibility="Collapsed">
+                            <TextBox x:Name="TextPreview"
+                                     TextWrapping="Wrap"
+                                     FontSize="15"
+                                     Foreground="#1F1A17"
+                                     IsReadOnly="True"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     VerticalScrollBarVisibility="Disabled"
+                                     HorizontalScrollBarVisibility="Disabled" />
+                        </ScrollViewer>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <Border x:Name="FeedbackPanel"
+                    Grid.Row="1"
+                    Grid.ColumnSpan="3"
+                    Margin="0,0,0,20"
+                    Padding="16,12"
+                    Background="#C96442"
+                    BorderBrush="#C96442"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Bottom"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="FeedbackText"
+                           Text="已粘贴"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           Foreground="White" />
+            </Border>
+        </Grid>
+    </Border>
+</Window>
