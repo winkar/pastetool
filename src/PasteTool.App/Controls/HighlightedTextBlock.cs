@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -8,6 +9,9 @@ namespace PasteTool.App.Controls;
 
 public sealed class HighlightedTextBlock : TextBlock
 {
+    private static readonly SolidColorBrush HighlightBackgroundBrush = CreateFrozenBrush(System.Windows.Media.Color.FromRgb(255, 235, 59));
+    private static readonly SolidColorBrush HighlightForegroundBrush = CreateFrozenBrush(System.Windows.Media.Color.FromRgb(31, 26, 23));
+
     public static readonly DependencyProperty ItemProperty =
         DependencyProperty.Register(
             nameof(Item),
@@ -25,7 +29,26 @@ public sealed class HighlightedTextBlock : TextBlock
     {
         if (d is HighlightedTextBlock textBlock)
         {
+            if (e.OldValue is HistoryListItem oldItem)
+            {
+                PropertyChangedEventManager.RemoveHandler(oldItem, textBlock.OnItemPropertyChanged, string.Empty);
+            }
+
+            if (e.NewValue is HistoryListItem newItem)
+            {
+                PropertyChangedEventManager.AddHandler(newItem, textBlock.OnItemPropertyChanged, string.Empty);
+            }
+
             textBlock.UpdateInlines();
+        }
+    }
+
+    private void OnItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(HistoryListItem.HighlightedPreviewSegments) ||
+            string.IsNullOrWhiteSpace(e.PropertyName))
+        {
+            UpdateInlines();
         }
     }
 
@@ -43,11 +66,18 @@ public sealed class HighlightedTextBlock : TextBlock
             var run = new Run(segment.Text);
             if (segment.IsHighlighted)
             {
-                run.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 235, 59));
-                run.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(31, 26, 23));
+                run.Background = HighlightBackgroundBrush;
+                run.Foreground = HighlightForegroundBrush;
                 run.FontWeight = FontWeights.Bold;
             }
             Inlines.Add(run);
         }
+    }
+
+    private static SolidColorBrush CreateFrozenBrush(System.Windows.Media.Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
     }
 }

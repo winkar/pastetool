@@ -34,7 +34,7 @@ public partial class HistoryWindow : Window
     private int _searchRequestVersion;
     private static readonly string _logFilePath = Path.Combine(Path.GetTempPath(), "pastetool_debug.log");
     private static readonly object _logLock = new();
-    private const int SearchResultLimit = 200;
+    private const int SearchResultLimit = 50;
 
     public HistoryWindow(
         ClipboardHistoryManager historyManager,
@@ -317,12 +317,9 @@ public partial class HistoryWindow : Window
     private void ApplySearchResults(IReadOnlyList<ClipEntry> results, string? searchQuery)
     {
         var selectedHash = (HistoryList.SelectedItem as HistoryListItem)?.Entry.ContentHash;
+        var desiredItems = BuildDesiredItems(results, searchQuery);
 
-        _items.Clear();
-        foreach (var entry in results)
-        {
-            _items.Add(new HistoryListItem(entry, searchQuery));
-        }
+        SyncVisibleItems(desiredItems);
 
         EmptyStateText.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -334,8 +331,76 @@ public partial class HistoryWindow : Window
         }
 
         var preferred = _items.FirstOrDefault(item => item.Entry.ContentHash == selectedHash) ?? _items[0];
-        HistoryList.SelectedItem = preferred;
-        HistoryList.ScrollIntoView(preferred);
+        if (!ReferenceEquals(HistoryList.SelectedItem, preferred))
+        {
+            HistoryList.SelectedItem = preferred;
+        }
+    }
+
+    private List<HistoryListItem> BuildDesiredItems(IReadOnlyList<ClipEntry> results, string? searchQuery)
+    {
+        var existingItems = _items.ToDictionary(item => item.Entry.ContentHash, StringComparer.Ordinal);
+        var desiredItems = new List<HistoryListItem>(results.Count);
+
+        foreach (var entry in results)
+        {
+            if (existingItems.TryGetValue(entry.ContentHash, out var existingItem))
+            {
+                existingItem.UpdateEntry(entry);
+                existingItem.UpdateSearchQuery(searchQuery);
+                desiredItems.Add(existingItem);
+                continue;
+            }
+
+            desiredItems.Add(new HistoryListItem(entry, searchQuery));
+        }
+
+        return desiredItems;
+    }
+
+    private void SyncVisibleItems(IReadOnlyList<HistoryListItem> desiredItems)
+    {
+        var desiredHashes = desiredItems
+            .Select(item => item.Entry.ContentHash)
+            .ToHashSet(StringComparer.Ordinal);
+
+        for (var index = _items.Count - 1; index >= 0; index--)
+        {
+            if (!desiredHashes.Contains(_items[index].Entry.ContentHash))
+            {
+                _items.RemoveAt(index);
+            }
+        }
+
+        for (var index = 0; index < desiredItems.Count; index++)
+        {
+            var desiredItem = desiredItems[index];
+            if (index < _items.Count && ReferenceEquals(_items[index], desiredItem))
+            {
+                continue;
+            }
+
+            var existingIndex = _items.IndexOf(desiredItem);
+            if (existingIndex >= 0)
+            {
+                _items.Move(existingIndex, index);
+                continue;
+            }
+
+            if (index <= _items.Count)
+            {
+                _items.Insert(index, desiredItem);
+            }
+            else
+            {
+                _items.Add(desiredItem);
+            }
+        }
+
+        while (_items.Count > desiredItems.Count)
+        {
+            _items.RemoveAt(_items.Count - 1);
+        }
     }
 
     private async Task PasteSelectedAsync()

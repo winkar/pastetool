@@ -9,4 +9,4 @@ publish/
 *.log
 
 build-debug.log
-historywindow_capture.png
+historywindow*.png
