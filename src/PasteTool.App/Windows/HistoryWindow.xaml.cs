@@ -18,10 +18,12 @@ namespace PasteTool.App.Windows;
 
 public partial class HistoryWindow : Window
 {
+    private const int SearchDebounceMilliseconds = 50;
+    private const int SearchResultLimit = 50;
     private readonly ClipboardHistoryManager _historyManager;
     private readonly ISearchService _searchService;
     private readonly Func<string, int, CancellationToken, Task<IReadOnlyList<ClipEntry>>> _searchEntriesAction;
-    private readonly Func<ClipEntry, Task<CapturedClipboardPayload?>> _payloadLoader;
+    private readonly Func<ClipEntry, CancellationToken, Task<CapturedClipboardPayload?>> _payloadLoader;
     private readonly Func<ClipEntry, IntPtr, Task> _pasteAction;
     private readonly Action _showSettingsAction;
     private readonly Func<Task> _clearHistoryAction;
@@ -36,13 +38,12 @@ public partial class HistoryWindow : Window
     private int _searchRequestVersion;
     private static readonly string _logFilePath = Path.Combine(Path.GetTempPath(), "pastetool_debug.log");
     private static readonly object _logLock = new();
-    private const int SearchResultLimit = 50;
 
     public HistoryWindow(
         ClipboardHistoryManager historyManager,
         ISearchService searchService,
         Func<string, int, CancellationToken, Task<IReadOnlyList<ClipEntry>>> searchEntriesAction,
-        Func<ClipEntry, Task<CapturedClipboardPayload?>> payloadLoader,
+        Func<ClipEntry, CancellationToken, Task<CapturedClipboardPayload?>> payloadLoader,
         Func<ClipEntry, IntPtr, Task> pasteAction,
         Action showSettingsAction,
         Func<Task> clearHistoryAction)
@@ -70,7 +71,7 @@ public partial class HistoryWindow : Window
 
         _searchDebounceTimer = new DispatcherTimer
         {
-            Interval = TimeSpan.FromMilliseconds(300)
+            Interval = TimeSpan.FromMilliseconds(SearchDebounceMilliseconds)
         };
         _searchDebounceTimer.Tick += SearchDebounceTimer_Tick;
 
@@ -119,7 +120,9 @@ public partial class HistoryWindow : Window
 
         _historyManager.HistoryChanged -= HistoryManager_HistoryChanged;
         _previewCancellationTokenSource?.Cancel();
+        _previewCancellationTokenSource?.Dispose();
         _searchCancellationTokenSource?.Cancel();
+        _searchCancellationTokenSource?.Dispose();
         _searchDebounceTimer.Stop();
         base.OnClosing(e);
     }
@@ -270,30 +273,42 @@ public partial class HistoryWindow : Window
         var cancellationToken = _searchCancellationTokenSource.Token;
         var requestVersion = Interlocked.Increment(ref _searchRequestVersion);
         var searchQuery = SearchBox.Text;
+        var searchEntries = fallbackEntries ?? _historyManager.GetEntriesSnapshot();
 
         if (string.IsNullOrWhiteSpace(searchQuery))
         {
-            ApplySearchResults(fallbackEntries ?? _historyManager.GetEntriesSnapshot(), null);
+            ApplySearchResults(searchEntries, null);
+            return;
+        }
+
+        if (SearchNormalizer.ContainsCjk(searchQuery))
+        {
+            try
+            {
+                var inMemoryResults = await SearchInMemoryAsync(searchEntries, searchQuery, cancellationToken);
+                ApplySearchResultsOnUiThread(inMemoryResults, searchQuery, requestVersion);
+            }
+            catch (OperationCanceledException)
+            {
+                // Ignore cancelled searches.
+            }
             return;
         }
 
         try
         {
             var results = await _searchEntriesAction(searchQuery, SearchResultLimit, cancellationToken);
+            if (results.Count == 0)
+            {
+                results = await SearchInMemoryAsync(searchEntries, searchQuery, cancellationToken);
+            }
+
             if (cancellationToken.IsCancellationRequested || requestVersion != _searchRequestVersion)
             {
                 return;
             }
 
-            Dispatcher.Invoke(() =>
-            {
-                if (requestVersion != _searchRequestVersion || !string.Equals(SearchBox.Text, searchQuery, StringComparison.Ordinal))
-                {
-                    return;
-                }
-
-                ApplySearchResults(results, searchQuery);
-            });
+            ApplySearchResultsOnUiThread(results, searchQuery, requestVersion);
         }
         catch (OperationCanceledException)
         {
@@ -306,21 +321,29 @@ public partial class HistoryWindow : Window
                 return;
             }
 
-            var fallbackResults = _searchService
-                .Search(fallbackEntries ?? _historyManager.GetEntriesSnapshot(), searchQuery)
-                .Take(SearchResultLimit)
-                .ToArray();
-
-            Dispatcher.Invoke(() =>
-            {
-                if (requestVersion != _searchRequestVersion || !string.Equals(SearchBox.Text, searchQuery, StringComparison.Ordinal))
-                {
-                    return;
-                }
-
-                ApplySearchResults(fallbackResults, searchQuery);
-            });
+            var fallbackResults = await SearchInMemoryAsync(searchEntries, searchQuery, cancellationToken);
+            ApplySearchResultsOnUiThread(fallbackResults, searchQuery, requestVersion);
         }
+    }
+
+    private Task<IReadOnlyList<ClipEntry>> SearchInMemoryAsync(IReadOnlyList<ClipEntry> entries, string searchQuery, CancellationToken cancellationToken)
+    {
+        return Task.Run<IReadOnlyList<ClipEntry>>(
+            () => _searchService.Search(entries, searchQuery).Take(SearchResultLimit).ToArray(),
+            cancellationToken);
+    }
+
+    private void ApplySearchResultsOnUiThread(IReadOnlyList<ClipEntry> results, string searchQuery, int requestVersion)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            if (requestVersion != _searchRequestVersion || !string.Equals(SearchBox.Text, searchQuery, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            ApplySearchResults(results, searchQuery);
+        });
     }
 
     private void ApplySearchResults(IReadOnlyList<ClipEntry> results, string? searchQuery)
@@ -424,7 +447,11 @@ public partial class HistoryWindow : Window
         {
             _searchDebounceTimer.Stop();
             _previewCancellationTokenSource?.Cancel();
+            _previewCancellationTokenSource?.Dispose();
+            _previewCancellationTokenSource = null;
             _searchCancellationTokenSource?.Cancel();
+            _searchCancellationTokenSource?.Dispose();
+            _searchCancellationTokenSource = null;
             Hide();
         }
         finally
@@ -491,6 +518,7 @@ public partial class HistoryWindow : Window
     private async Task UpdatePreviewAsync(ClipEntry? entry)
     {
         _previewCancellationTokenSource?.Cancel();
+        _previewCancellationTokenSource?.Dispose();
         _previewCancellationTokenSource = new CancellationTokenSource();
         var cancellationToken = _previewCancellationTokenSource.Token;
 
@@ -524,7 +552,7 @@ public partial class HistoryWindow : Window
 
         try
         {
-            var payload = await _payloadLoader(entry);
+            var payload = await _payloadLoader(entry, cancellationToken);
             if (cancellationToken.IsCancellationRequested)
             {
                 return;
@@ -561,6 +589,10 @@ public partial class HistoryWindow : Window
             }
 
             ShowText(string.IsNullOrWhiteSpace(plainText) ? entry.PreviewText : plainText);
+            ShowLoadingIndicator(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
             ShowLoadingIndicator(false);
         }
         catch

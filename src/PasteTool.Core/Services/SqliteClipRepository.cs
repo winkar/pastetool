@@ -13,13 +13,11 @@ public sealed class SqliteClipRepository : IClipRepository
     private const int MaxImageBytes = 32 * 1024 * 1024;
     private const int PreviewLength = 180;
     private static readonly JsonSerializerOptions SerializerOptions = new() { WriteIndented = false };
-    private static readonly Regex SearchTokenRegex = new("[\\p{L}\\p{N}_]+", RegexOptions.Compiled);
-
     private readonly Func<AppSettings> _settingsAccessor;
     private readonly string _databasePath;
     private readonly string _blobDirectory;
     private readonly string _thumbnailDirectory;
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _dbGate = new(1, 1);
 
     public SqliteClipRepository(
         Func<AppSettings> settingsAccessor,
@@ -35,7 +33,7 @@ public sealed class SqliteClipRepository : IClipRepository
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        await _gate.WaitAsync(cancellationToken);
+        await _dbGate.WaitAsync(cancellationToken);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
@@ -46,20 +44,20 @@ public sealed class SqliteClipRepository : IClipRepository
         }
         finally
         {
-            _gate.Release();
+            _dbGate.Release();
         }
     }
 
     public async Task<IReadOnlyList<ClipEntry>> LoadEntriesAsync(CancellationToken cancellationToken = default)
     {
-        await _gate.WaitAsync(cancellationToken);
+        await _dbGate.WaitAsync(cancellationToken);
         try
         {
             return await LoadEntriesCoreAsync(cancellationToken);
         }
         finally
         {
-            _gate.Release();
+            _dbGate.Release();
         }
     }
 
@@ -70,7 +68,7 @@ public sealed class SqliteClipRepository : IClipRepository
             return null;
         }
 
-        await _gate.WaitAsync(cancellationToken);
+        await _dbGate.WaitAsync(cancellationToken);
         try
         {
             var prepared = await PrepareAsync(payload, cancellationToken);
@@ -158,7 +156,7 @@ public sealed class SqliteClipRepository : IClipRepository
         }
         finally
         {
-            _gate.Release();
+            _dbGate.Release();
         }
     }
 
@@ -181,7 +179,7 @@ public sealed class SqliteClipRepository : IClipRepository
             return Array.Empty<ClipEntry>();
         }
 
-        await _gate.WaitAsync(cancellationToken);
+        await _dbGate.WaitAsync(cancellationToken);
         try
         {
             await using var connection = await OpenConnectionAsync(cancellationToken);
@@ -222,7 +220,7 @@ public sealed class SqliteClipRepository : IClipRepository
         }
         finally
         {
-            _gate.Release();
+            _dbGate.Release();
         }
     }
 
@@ -233,50 +231,44 @@ public sealed class SqliteClipRepository : IClipRepository
             return null;
         }
 
-        await _gate.WaitAsync(cancellationToken);
-        try
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!File.Exists(entry.BlobPath))
         {
-            if (!File.Exists(entry.BlobPath))
-            {
-                return null;
-            }
+            return null;
+        }
 
-            if (entry.Kind == ClipKind.Image)
-            {
-                var bytes = await File.ReadAllBytesAsync(entry.BlobPath, cancellationToken);
-                return new CapturedClipboardPayload
-                {
-                    ImageBytes = bytes,
-                    ImagePixelWidth = entry.ImagePixelWidth,
-                    ImagePixelHeight = entry.ImagePixelHeight,
-                    SourceFormats = new[] { "Bitmap" },
-                };
-            }
-
-            await using var stream = File.OpenRead(entry.BlobPath);
-            var stored = await JsonSerializer.DeserializeAsync<StoredClipPayload>(stream, SerializerOptions, cancellationToken);
-            if (stored is null)
-            {
-                return null;
-            }
-
+        if (entry.Kind == ClipKind.Image)
+        {
+            var bytes = await File.ReadAllBytesAsync(entry.BlobPath, cancellationToken);
             return new CapturedClipboardPayload
             {
-                UnicodeText = stored.UnicodeText,
-                Rtf = stored.Rtf,
-                Html = stored.Html,
-                SourceFormats = stored.SourceFormats ?? Array.Empty<string>(),
+                ImageBytes = bytes,
+                ImagePixelWidth = entry.ImagePixelWidth,
+                ImagePixelHeight = entry.ImagePixelHeight,
+                SourceFormats = new[] { "Bitmap" },
             };
         }
-        finally
+
+        await using var stream = File.OpenRead(entry.BlobPath);
+        var stored = await JsonSerializer.DeserializeAsync<StoredClipPayload>(stream, SerializerOptions, cancellationToken);
+        if (stored is null)
         {
-            _gate.Release();
+            return null;
         }
+
+        return new CapturedClipboardPayload
+        {
+            UnicodeText = stored.UnicodeText,
+            Rtf = stored.Rtf,
+            Html = stored.Html,
+            SourceFormats = stored.SourceFormats ?? Array.Empty<string>(),
+        };
     }
 
     public async Task ClearAsync(CancellationToken cancellationToken = default)
     {
-        await _gate.WaitAsync(cancellationToken);
+        await _dbGate.WaitAsync(cancellationToken);
         try
         {
             await using var connection = await OpenConnectionAsync(cancellationToken);
@@ -294,13 +286,13 @@ public sealed class SqliteClipRepository : IClipRepository
         }
         finally
         {
-            _gate.Release();
+            _dbGate.Release();
         }
     }
 
     public void Dispose()
     {
-        _gate.Dispose();
+        _dbGate.Dispose();
     }
 
     private async Task EnsureSchemaAsync(CancellationToken cancellationToken)
@@ -861,11 +853,7 @@ public sealed class SqliteClipRepository : IClipRepository
 
     private static string[] ExtractSearchTokens(string normalizedQuery)
     {
-        return SearchTokenRegex.Matches(normalizedQuery)
-            .Select(match => match.Value)
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
+        return SearchNormalizer.ExtractTokens(normalizedQuery);
     }
 
     private static string BuildMatchQuery(IEnumerable<string> tokens)

@@ -50,7 +50,7 @@ public sealed class AppController : IDisposable
             _historyManager,
             new SearchService(),
             (query, limit, cancellationToken) => _clipRepository!.SearchEntriesAsync(query, limit, cancellationToken),
-            entry => _clipRepository!.LoadPayloadAsync(entry),
+            (entry, cancellationToken) => _clipRepository!.LoadPayloadAsync(entry, cancellationToken),
             PasteAsync,
             ShowSettings,
             ClearHistoryAsync);

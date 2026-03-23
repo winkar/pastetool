@@ -30,7 +30,12 @@ public sealed class SearchService : ISearchService
             return results;
         }
 
-        var tokens = normalizedQuery.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var tokens = SearchNormalizer.ExtractTokens(normalizedQuery);
+        if (tokens.Length == 0)
+        {
+            return Array.Empty<ClipEntry>();
+        }
+
         var matchedResults = new List<SearchResult>(entries.Count);
 
         for (int i = 0; i < entries.Count; i++)
