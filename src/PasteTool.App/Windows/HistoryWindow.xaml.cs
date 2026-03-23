@@ -30,6 +30,8 @@ public partial class HistoryWindow : Window
     private CancellationTokenSource? _previewCancellationTokenSource;
     private CancellationTokenSource? _searchCancellationTokenSource;
     private bool _allowClose;
+    private bool _isDismissingOverlay;
+    private bool _isPasteInProgress;
     private IntPtr _targetWindowHandle;
     private int _searchRequestVersion;
     private static readonly string _logFilePath = Path.Combine(Path.GetTempPath(), "pastetool_debug.log");
@@ -92,6 +94,12 @@ public partial class HistoryWindow : Window
         Activate();
         SearchBox.Focus();
         SearchBox.SelectAll();
+
+        // 滚动到列表顶部，显示最新内容
+        if (_items.Count > 0)
+        {
+            Dispatcher.InvokeAsync(() => HistoryList.ScrollIntoView(_items[0]), DispatcherPriority.Loaded);
+        }
     }
 
     public void CloseForExit()
@@ -105,7 +113,7 @@ public partial class HistoryWindow : Window
         if (!_allowClose)
         {
             e.Cancel = true;
-            Hide();
+            DismissOverlay();
             return;
         }
 
@@ -122,7 +130,7 @@ public partial class HistoryWindow : Window
 
         if (IsVisible)
         {
-            Hide();
+            DismissOverlay();
         }
     }
 
@@ -171,14 +179,6 @@ public partial class HistoryWindow : Window
                 MoveSelection(-1);
                 e.Handled = true;
                 break;
-            case Key.Enter:
-                _ = PasteSelectedAsync();
-                e.Handled = true;
-                break;
-            case Key.Escape:
-                Hide();
-                e.Handled = true;
-                break;
             case Key.Tab:
                 if (!Keyboard.IsKeyDown(Key.LeftShift) && !Keyboard.IsKeyDown(Key.RightShift))
                 {
@@ -194,19 +194,19 @@ public partial class HistoryWindow : Window
         }
     }
 
-    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    private async void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Escape)
         {
-            Hide();
+            DismissOverlay();
             e.Handled = true;
             return;
         }
 
         if (e.Key == Key.Enter)
         {
-            _ = PasteSelectedAsync();
             e.Handled = true;
+            await PasteSelectedAsync();
         }
     }
 
@@ -215,20 +215,29 @@ public partial class HistoryWindow : Window
         _ = UpdatePreviewAsync((HistoryList.SelectedItem as HistoryListItem)?.Entry);
     }
 
-    private void HistoryList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    private async void HistoryList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        _ = PasteSelectedAsync();
+        // 确保点击的是列表项而非空白区域
+        if (ItemsControl.ContainerFromElement(HistoryList, e.OriginalSource as DependencyObject) is not ListBoxItem item ||
+            item.DataContext is not HistoryListItem historyItem)
+        {
+            return;
+        }
+
+        HistoryList.SelectedItem = historyItem;
+        e.Handled = true;
+        await PasteSelectedAsync(historyItem.Entry);
     }
 
     private void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
-        Hide();
+        DismissOverlay();
         _showSettingsAction();
     }
 
     private async void ClearButton_Click(object sender, RoutedEventArgs e)
     {
-        Hide();
+        DismissOverlay();
         await _clearHistoryAction();
     }
 
@@ -403,15 +412,46 @@ public partial class HistoryWindow : Window
         }
     }
 
-    private async Task PasteSelectedAsync()
+    private void DismissOverlay()
     {
-        var selected = (HistoryList.SelectedItem as HistoryListItem)?.Entry;
+        if (_isDismissingOverlay || !IsVisible)
+        {
+            return;
+        }
+
+        _isDismissingOverlay = true;
+        try
+        {
+            _searchDebounceTimer.Stop();
+            _previewCancellationTokenSource?.Cancel();
+            _searchCancellationTokenSource?.Cancel();
+            Hide();
+        }
+        finally
+        {
+            _isDismissingOverlay = false;
+        }
+    }
+
+    private async Task PasteSelectedAsync(ClipEntry? entry = null)
+    {
+        if (_isPasteInProgress)
+        {
+            return;
+        }
+
+        var selected = entry ?? (HistoryList.SelectedItem as HistoryListItem)?.Entry;
         if (selected is null)
         {
             return;
         }
 
-        Hide();
+        _isPasteInProgress = true;
+
+        // 在窗口隐藏之前（仍是前台时）允许其他进程切换前台
+        // Windows 限制：Hide() 之后 PasteTool 不再是前台进程，SetForegroundWindow 会静默失败
+        NativeMethods.AllowSetForegroundWindow(NativeMethods.AsfwAny);
+        DismissOverlay();
 
         try
         {
@@ -421,6 +461,10 @@ public partial class HistoryWindow : Window
         catch (Exception ex)
         {
             ShowPasteFeedback($"粘贴失败: {ex.Message}");
+        }
+        finally
+        {
+            _isPasteInProgress = false;
         }
     }
 
@@ -502,6 +546,18 @@ public partial class HistoryWindow : Window
 
                 ShowLoadingIndicator(false);
                 return;
+            }
+
+            // 尝试以表格形式显示 HTML（如 Excel 复制的行数据）
+            if (!string.IsNullOrWhiteSpace(payload?.Html))
+            {
+                var tableText = HtmlTextExtractor.TryExtractTableText(payload.Html!);
+                if (!string.IsNullOrWhiteSpace(tableText))
+                {
+                    ShowText(tableText);
+                    ShowLoadingIndicator(false);
+                    return;
+                }
             }
 
             ShowText(string.IsNullOrWhiteSpace(plainText) ? entry.PreviewText : plainText);
