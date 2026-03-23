@@ -690,7 +690,12 @@ public sealed class SqliteClipRepository : IClipRepository
 
     private static ClipKind ResolveKind(CapturedClipboardPayload payload)
     {
-        if (payload.ImageBytes is { Length: > 0 })
+        // 如果同时有文字内容，优先识别为文字类型（如 Excel 行数据会同时包含 HTML 和 Bitmap）
+        var hasText = !string.IsNullOrWhiteSpace(payload.UnicodeText) ||
+                      !string.IsNullOrWhiteSpace(payload.Rtf) ||
+                      !string.IsNullOrWhiteSpace(payload.Html);
+
+        if (!hasText && payload.ImageBytes is { Length: > 0 })
         {
             return ClipKind.Image;
         }
