@@ -9,6 +9,7 @@ public sealed class ClipboardHistoryManager : IDisposable
     private readonly IClipRepository _clipRepository;
     private readonly IPasteService _pasteService;
     private readonly ILogger _logger;
+    private readonly PayloadCache _payloadCache = new();
     private readonly object _syncRoot = new();
     private readonly SemaphoreSlim _processingGate = new(1, 1);
     private IReadOnlyList<ClipEntry> _entries = Array.Empty<ClipEntry>();
@@ -66,14 +67,30 @@ public sealed class ClipboardHistoryManager : IDisposable
 
     public async Task PasteAsync(ClipEntry entry, IntPtr targetWindowHandle, CancellationToken cancellationToken = default)
     {
-        var payload = await _clipRepository.LoadPayloadAsync(entry, cancellationToken);
+        var payload = await LoadPayloadAsync(entry, cancellationToken);
         if (payload is null)
         {
             return;
         }
 
-        MarkSuppressed(entry.ContentHash);
         await _pasteService.PasteAsync(payload, targetWindowHandle, cancellationToken);
+        MarkSuppressed(entry.ContentHash);
+    }
+
+    public async Task<CapturedClipboardPayload?> LoadPayloadAsync(ClipEntry entry, CancellationToken cancellationToken = default)
+    {
+        if (_payloadCache.TryGet(entry.ContentHash, out var cachedPayload))
+        {
+            return cachedPayload;
+        }
+
+        var payload = await _clipRepository.LoadPayloadAsync(entry, cancellationToken);
+        if (payload is not null)
+        {
+            _payloadCache.Store(entry.ContentHash, payload);
+        }
+
+        return payload;
     }
 
     private void OnClipboardCaptured(object? sender, ClipboardPayloadCapturedEventArgs e)
@@ -122,6 +139,8 @@ public sealed class ClipboardHistoryManager : IDisposable
             {
                 return;
             }
+
+            _payloadCache.Store(saveResult.Entry.ContentHash, payload);
 
             lock (_syncRoot)
             {

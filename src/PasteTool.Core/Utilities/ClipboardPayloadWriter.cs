@@ -6,33 +6,7 @@ namespace PasteTool.Core.Utilities;
 
 internal static class ClipboardPayloadWriter
 {
-    public static void Write(CapturedClipboardPayload payload)
-    {
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            try
-            {
-                WriteCore(payload);
-                return;
-            }
-            catch (COMException)
-            {
-                if (attempt < 2)
-                {
-                    Thread.Sleep(50 * (attempt + 1)); // Exponential backoff: 50ms, 100ms
-                }
-            }
-            catch (ExternalException)
-            {
-                if (attempt < 2)
-                {
-                    Thread.Sleep(50 * (attempt + 1));
-                }
-            }
-        }
-    }
-
-    private static void WriteCore(CapturedClipboardPayload payload)
+    public static DataObject CreateDataObject(CapturedClipboardPayload payload)
     {
         var dataObject = new DataObject();
 
@@ -61,6 +35,47 @@ internal static class ClipboardPayloadWriter
             }
         }
 
-        Clipboard.SetDataObject(dataObject, true);
+        return dataObject;
+    }
+
+    public static void Write(CapturedClipboardPayload payload, bool copy = true)
+    {
+        Exception? lastException = null;
+
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                WriteCore(payload, copy);
+                return;
+            }
+            catch (COMException ex)
+            {
+                lastException = ex;
+                if (attempt < 2)
+                {
+                    Thread.Sleep(50 * (attempt + 1)); // Exponential backoff: 50ms, 100ms
+                }
+            }
+            catch (ExternalException ex)
+            {
+                lastException = ex;
+                if (attempt < 2)
+                {
+                    Thread.Sleep(50 * (attempt + 1));
+                }
+            }
+        }
+
+        if (lastException is not null)
+        {
+            throw lastException;
+        }
+    }
+
+    private static void WriteCore(CapturedClipboardPayload payload, bool copy)
+    {
+        var dataObject = CreateDataObject(payload);
+        Clipboard.SetDataObject(dataObject, copy);
     }
 }

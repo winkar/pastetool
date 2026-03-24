@@ -1,4 +1,5 @@
 using System.Windows.Threading;
+using PasteTool.Core.Native;
 
 namespace PasteTool.Core.Utilities;
 
@@ -7,6 +8,7 @@ public sealed class StaDispatcher : IDisposable
     private readonly TaskCompletionSource<Dispatcher> _dispatcherSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Thread _thread;
     private bool _disposed;
+    private bool _oleInitialized;
 
     public StaDispatcher(string name)
     {
@@ -65,7 +67,19 @@ public sealed class StaDispatcher : IDisposable
 
     private void ThreadStart()
     {
-        _dispatcherSource.TrySetResult(Dispatcher.CurrentDispatcher);
-        Dispatcher.Run();
+        try
+        {
+            var hr = OleMethods.OleInitialize(IntPtr.Zero);
+            _oleInitialized = hr >= 0;
+            _dispatcherSource.TrySetResult(Dispatcher.CurrentDispatcher);
+            Dispatcher.Run();
+        }
+        finally
+        {
+            if (_oleInitialized)
+            {
+                OleMethods.OleUninitialize();
+            }
+        }
     }
 }

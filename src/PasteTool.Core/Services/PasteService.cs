@@ -1,53 +1,55 @@
 using System.Runtime.InteropServices;
 using PasteTool.Core.Models;
 using PasteTool.Core.Native;
-using PasteTool.Core.Utilities;
 
 namespace PasteTool.Core.Services;
 
 public sealed class PasteService : IPasteService, IDisposable
 {
-    private readonly StaDispatcher _dispatcher = new("PasteTool.PasteWorker");
+    private static readonly TimeSpan ForegroundWaitTimeout = TimeSpan.FromMilliseconds(60);
+    private static readonly TimeSpan ForegroundPollInterval = TimeSpan.FromMilliseconds(5);
     private readonly ILogger _logger;
+    private readonly IClipboardTransport _clipboardTransport;
+    private readonly IPasteNativeMethods _nativeMethods;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
 
     public PasteService(ILogger logger)
+        : this(logger, new DelayedClipboardPasteTransport(logger), new PasteNativeMethodsAdapter(), Task.Delay)
+    {
+    }
+
+    internal PasteService(
+        ILogger logger,
+        IClipboardTransport clipboardTransport,
+        IPasteNativeMethods nativeMethods,
+        Func<TimeSpan, CancellationToken, Task> delayAsync)
     {
         _logger = logger;
+        _clipboardTransport = clipboardTransport;
+        _nativeMethods = nativeMethods;
+        _delayAsync = delayAsync;
     }
 
     public async Task PasteAsync(CapturedClipboardPayload payload, IntPtr targetWindowHandle, CancellationToken cancellationToken = default)
     {
         try
         {
-            await _dispatcher.InvokeAsync(() => ClipboardPayloadWriter.Write(payload));
-            await Task.Delay(50, cancellationToken);
+            await _clipboardTransport.SetClipboardPayloadAsync(payload, cancellationToken);
 
             if (targetWindowHandle != IntPtr.Zero)
             {
-                if (!NativeMethods.IsWindow(targetWindowHandle))
+                if (!_nativeMethods.IsWindow(targetWindowHandle))
                 {
                     _logger.LogWarning($"Target window handle is invalid: 0x{targetWindowHandle.ToInt64():X}");
-                    await SendPasteKeysAsync(cancellationToken);
-                    return;
                 }
-
-                _logger.LogInfo($"Attempting paste to target window 0x{targetWindowHandle.ToInt64():X}");
-
-                var placement = new NativeMethods.WINDOWPLACEMENT
+                else
                 {
-                    length = (uint)Marshal.SizeOf<NativeMethods.WINDOWPLACEMENT>()
-                };
-                NativeMethods.GetWindowPlacement(targetWindowHandle, ref placement);
-                if (placement.showCmd == NativeMethods.SwShowMinimized)
-                {
-                    NativeMethods.ShowWindowAsync(targetWindowHandle, NativeMethods.SwRestore);
-                    await Task.Delay(30, cancellationToken);
+                    _logger.LogInfo($"Attempting paste to target window 0x{targetWindowHandle.ToInt64():X}");
+                    await TryRestoreWindowAsync(targetWindowHandle, cancellationToken);
                 }
-
-                await RestoreTargetWindowAsync(targetWindowHandle, cancellationToken);
             }
 
-            await SendPasteKeysAsync(cancellationToken);
+            SendPasteKeys();
         }
         catch (Exception ex)
         {
@@ -58,16 +60,34 @@ public sealed class PasteService : IPasteService, IDisposable
 
     public void Dispose()
     {
-        _dispatcher.Dispose();
+        if (_clipboardTransport is IDisposable disposableTransport)
+        {
+            disposableTransport.Dispose();
+        }
     }
 
-    private async Task RestoreTargetWindowAsync(IntPtr targetWindowHandle, CancellationToken cancellationToken)
+    private async Task<bool> TryRestoreWindowAsync(IntPtr targetWindowHandle, CancellationToken cancellationToken)
     {
-        var foregroundWindow = NativeMethods.GetForegroundWindow();
-        var currentThreadId = NativeMethods.GetCurrentThreadId();
-        var targetThreadId = NativeMethods.GetWindowThreadProcessId(targetWindowHandle, out _);
+        var placement = new NativeMethods.WINDOWPLACEMENT
+        {
+            length = (uint)Marshal.SizeOf<NativeMethods.WINDOWPLACEMENT>()
+        };
+        _nativeMethods.GetWindowPlacement(targetWindowHandle, ref placement);
+        if (placement.showCmd == NativeMethods.SwShowMinimized)
+        {
+            _nativeMethods.ShowWindowAsync(targetWindowHandle, NativeMethods.SwRestore);
+        }
+
+        var foregroundWindow = _nativeMethods.GetForegroundWindow();
+        if (foregroundWindow == targetWindowHandle)
+        {
+            return true;
+        }
+
+        var currentThreadId = _nativeMethods.GetCurrentThreadId();
+        var targetThreadId = _nativeMethods.GetWindowThreadProcessId(targetWindowHandle, out _);
         var foregroundThreadId = foregroundWindow != IntPtr.Zero
-            ? NativeMethods.GetWindowThreadProcessId(foregroundWindow, out _)
+            ? _nativeMethods.GetWindowThreadProcessId(foregroundWindow, out _)
             : 0;
 
         var attachedToForeground = false;
@@ -77,74 +97,88 @@ public sealed class PasteService : IPasteService, IDisposable
         {
             if (foregroundThreadId != 0 && foregroundThreadId != currentThreadId)
             {
-                attachedToForeground = NativeMethods.AttachThreadInput(currentThreadId, foregroundThreadId, true);
+                attachedToForeground = _nativeMethods.AttachThreadInput(currentThreadId, foregroundThreadId, true);
             }
 
             if (targetThreadId != 0 && targetThreadId != currentThreadId)
             {
-                attachedToTarget = NativeMethods.AttachThreadInput(currentThreadId, targetThreadId, true);
+                attachedToTarget = _nativeMethods.AttachThreadInput(currentThreadId, targetThreadId, true);
             }
 
-            for (var attempt = 0; attempt < 6; attempt++)
+            _nativeMethods.BringWindowToTop(targetWindowHandle);
+            _nativeMethods.SetForegroundWindow(targetWindowHandle);
+
+            if (_nativeMethods.GetForegroundWindow() == targetWindowHandle)
+            {
+                _logger.LogInfo($"Foreground restored to target window 0x{targetWindowHandle.ToInt64():X} immediately");
+                return true;
+            }
+
+            var deadline = DateTime.UtcNow + ForegroundWaitTimeout;
+            while (DateTime.UtcNow < deadline)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                await _delayAsync(ForegroundPollInterval, cancellationToken);
 
-                NativeMethods.BringWindowToTop(targetWindowHandle);
-                NativeMethods.SetForegroundWindow(targetWindowHandle);
-
-                await Task.Delay(40, cancellationToken);
-
-                if (NativeMethods.GetForegroundWindow() == targetWindowHandle)
+                if (_nativeMethods.GetForegroundWindow() == targetWindowHandle)
                 {
-                    _logger.LogInfo($"Foreground restored to target window 0x{targetWindowHandle.ToInt64():X} on attempt {attempt + 1}");
-                    return;
+                    _logger.LogInfo($"Foreground restored to target window 0x{targetWindowHandle.ToInt64():X} after short wait");
+                    return true;
                 }
             }
 
-            var actualForegroundWindow = NativeMethods.GetForegroundWindow();
+            var actualForegroundWindow = _nativeMethods.GetForegroundWindow();
             _logger.LogWarning(
                 $"Failed to restore target window before paste. Target=0x{targetWindowHandle.ToInt64():X}, Foreground=0x{actualForegroundWindow.ToInt64():X}");
+            return false;
         }
         finally
         {
             if (attachedToTarget)
             {
-                NativeMethods.AttachThreadInput(currentThreadId, targetThreadId, false);
+                _nativeMethods.AttachThreadInput(currentThreadId, targetThreadId, false);
             }
 
             if (attachedToForeground)
             {
-                NativeMethods.AttachThreadInput(currentThreadId, foregroundThreadId, false);
+                _nativeMethods.AttachThreadInput(currentThreadId, foregroundThreadId, false);
             }
         }
     }
 
-    private async Task SendPasteKeysAsync(CancellationToken cancellationToken)
+    private void SendPasteKeys()
     {
-        ReleaseModifierKeys();
-        await Task.Delay(30, cancellationToken);
+        var pressedModifiers = GetPressedModifierKeys();
+        var inputs = new NativeMethods.INPUT[pressedModifiers.Count + 4];
+        var index = 0;
 
-        var inputs = new[]
+        foreach (var modifierKey in pressedModifiers)
         {
-            CreateKeyInput(NativeMethods.VkControl, false),
-            CreateKeyInput(NativeMethods.VkV, false),
-            CreateKeyInput(NativeMethods.VkV, true),
-            CreateKeyInput(NativeMethods.VkControl, true),
-        };
+            inputs[index++] = CreateKeyInput(modifierKey, keyUp: true);
+        }
 
-        var sent = NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
+        inputs[index++] = CreateKeyInput(NativeMethods.VkControl, false);
+        inputs[index++] = CreateKeyInput(NativeMethods.VkV, false);
+        inputs[index++] = CreateKeyInput(NativeMethods.VkV, true);
+        inputs[index] = CreateKeyInput(NativeMethods.VkControl, true);
+
+        var sent = _nativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
         if (sent != inputs.Length)
         {
             var error = Marshal.GetLastWin32Error();
             _logger.LogWarning($"SendInput sent {sent}/{inputs.Length} keyboard events; Win32Error={error}");
+            return;
         }
-        else
+
+        if (pressedModifiers.Count > 0)
         {
-            _logger.LogInfo("SendInput sent Ctrl+V successfully");
+            _logger.LogInfo($"Released modifiers before paste: {string.Join(", ", pressedModifiers.Select(DescribeVirtualKey))}");
         }
+
+        _logger.LogInfo("SendInput sent Ctrl+V successfully");
     }
 
-    private void ReleaseModifierKeys()
+    private List<ushort> GetPressedModifierKeys()
     {
         var pressedModifiers = new List<ushort>();
         var modifierKeys = new[]
@@ -158,7 +192,7 @@ public sealed class PasteService : IPasteService, IDisposable
 
         foreach (var key in modifierKeys)
         {
-            if ((NativeMethods.GetAsyncKeyState(key) & 0x8000) == 0)
+            if ((_nativeMethods.GetAsyncKeyState(key) & 0x8000) == 0)
             {
                 continue;
             }
@@ -166,18 +200,7 @@ public sealed class PasteService : IPasteService, IDisposable
             pressedModifiers.Add(key);
         }
 
-        if (pressedModifiers.Count == 0)
-        {
-            return;
-        }
-
-        var releaseInputs = pressedModifiers
-            .Select(key => CreateKeyInput(key, true))
-            .ToArray();
-
-        var sent = NativeMethods.SendInput((uint)releaseInputs.Length, releaseInputs, Marshal.SizeOf<NativeMethods.INPUT>());
-        var error = sent == releaseInputs.Length ? 0 : Marshal.GetLastWin32Error();
-        _logger.LogInfo($"Released modifiers before paste: {string.Join(", ", pressedModifiers.Select(DescribeVirtualKey))}; sent {sent}/{releaseInputs.Length} events; Win32Error={error}");
+        return pressedModifiers;
     }
 
     private static string DescribeVirtualKey(ushort key)
